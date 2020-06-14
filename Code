@@ -1,0 +1,198 @@
+// Arduino pin numbers
+  // Output's
+  const int ClawServo_Pin = 10; //  the claw opening/closing servo
+  const int ClawStepperDirPin = 9; // indicates the direction of the steppermotor
+  const int ClawStepperPulsePin = 6; // pulses the steppermotordriver
+
+  // Input's
+  const int ClawPot = A2;               // Potentiometer to control the claw opening and closing
+  const int ClawMovableSwitch = 8;      // Switch to enable or disable the option to open/close the claw
+  const int ClawRotateButton = 7;       // button to rotate the claw
+  const int ClawRotateEndStop = 14;     // endstop of the rotating part of the arm, so we can home it
+
+  // Led's
+  const int ClawMovableGreenLed = 2;    // indicates that the claw may be opened/closed
+  const int ClawMovableRedLed = 3;      // indicates that the claw may not be opened/closed
+  const int ClawRotatableGreenLed = 5;  // indicates you may push the rotate button
+  const int ClawRotatableYellowLed = 4; //  indicates that  you may not push the rotate button (blinks when homing, full on when rotating)
+
+// Setting up the servo
+#include <Servo.h>
+Servo ClawServo;
+
+// Variables
+int ArmRotatable = 2;                  // variable to indicate if the arm may be rotated (1 YES/0 MOVING(NO)/2 HOMING(NO))
+int ClawRotatableYellowLedState = 2;   // variable to indicate what the led "ClawRotatableYellowLed" must do (1 ON/0 OFF/2 BLINK)
+int YellowLedCouter = 0;               // counter to led the yellow light blink
+int ClawEndStopStatus = LOW;
+//int ArmLastPosition = 2;               // variable to remember the last postion of the arm in (2 UNKNOWN/1 UP/0 DOWN
+
+// logic for reading the button
+int ClawRotateButtonPosition = LOW;
+  int ClawRotateButtonPreviousPosition = LOW;
+
+int ClawMovableSwitchPosition = LOW;
+
+// Variables for motor speed control
+const int HomingSpeed = 10;         // the delay between pulses (steps) while the motor homes
+const int TurningSpeed = 2;        // the delay between pulses (steps) while the motor turns during normal operation
+const int FlatPoint = 20;          // the position where the motor is considered horizontal
+const int TopDownPoint = 240;      // position where to motor is exactly 180 degrees turned
+
+// Variables for motor control
+int MotorPosition = 0;             // variable to track where the motor is in its rotation
+int HomingStatus = 0;              // variable to help home the motor; 0 = looking for endstop, 1 = endstop found, moving to flat position , 2 = done
+int RotatingStatus = 2;            // variable to see what the motor needs to do; 2 = not move, until it is told to do so, 1 = move to TopDownPoin, 0 = move to FlatPoint
+
+// Variables for smoothing the potmeter-input
+const int NumReadings = 10;        // value to determine the size of the readings array
+int ClawPotReadingSmoothed;        // smoothed result for the ClawServo input
+int TotalClawPotReadings = 0;      // the running total
+int ClawPotReadings[NumReadings];  // the readings from the analog input
+int ClawPotReadingIndex = 0;       // the index of the current reading
+
+void setup() {  // put your setup code here, to run once:
+  // Setting pins to in/output
+   pinMode(ClawServo_Pin, OUTPUT);
+   pinMode(ClawStepperDirPin, OUTPUT);
+   pinMode(ClawStepperPulsePin, OUTPUT);
+   pinMode(ClawMovableGreenLed, OUTPUT);
+   pinMode(ClawMovableRedLed, OUTPUT);
+   pinMode(ClawRotatableGreenLed, OUTPUT);
+   pinMode(ClawRotatableYellowLed, OUTPUT);
+
+   pinMode(ClawMovableSwitch, INPUT);
+   pinMode(ClawRotateButton, INPUT);
+   pinMode(ClawRotateEndStop, INPUT);
+
+  //connecting servo
+  ClawServo.attach (ClawServo_Pin);
+
+  for (int thisReading = 0; thisReading < NumReadings; thisReading++) {
+    ClawPotReadings[thisReading] = 0;}
+}
+
+void loop() {  // put your main code here, to run repeatedly:
+
+// setting the led's that indicate the rotation status
+if (ArmRotatable == 1){                        // see if the arm is allowed to rotate, if yes; turn on that indicator light
+  digitalWrite(ClawRotatableGreenLed, HIGH);
+  ClawRotatableYellowLedState = 0;
+}
+else if (ArmRotatable == 0){                   // see if the arm is allowed to rotate, if no; turn on that indicator light
+  digitalWrite(ClawRotatableGreenLed, LOW);
+  ClawRotatableYellowLedState = 1;
+}
+else {                                         // if the arm is neither allowed or forbidden to rotate, it must be homing; tell the light to blink
+  digitalWrite(ClawRotatableGreenLed, LOW);
+  ClawRotatableYellowLedState = 2;
+}
+
+if (ClawRotatableYellowLedState == 2){
+  digitalWrite(ClawRotatableGreenLed, LOW);
+  if (YellowLedCouter <= 1000){
+     digitalWrite(ClawRotatableYellowLed, HIGH);
+     YellowLedCouter ++;
+  }
+  else if (YellowLedCouter >= 1000 && YellowLedCouter <= 2000){
+     digitalWrite(ClawRotatableYellowLed, LOW);
+     YellowLedCouter ++;
+  }
+  else {
+    YellowLedCouter = 0;
+  }
+}
+else {
+  digitalWrite(ClawRotatableYellowLed, LOW);
+}
+
+// part of the code that rotates or homes the arm depending on input/state
+ClawRotateButtonPosition = digitalRead(ClawRotateButton);
+ClawEndStopStatus = digitalRead(ClawRotateEndStop);
+  if (ArmRotatable == 2){                                             // see if the arm needs to be homed, if yes, do so
+    if (digitalRead(ClawRotateEndStop) == LOW && HomingStatus == 0){  // if the arm still needsd to move to the endstop, do so
+      digitalWrite(ClawStepperDirPin, LOW);                           // set the direction of the stepper to couter-clockwise
+      digitalWrite(ClawStepperPulsePin, HIGH);                        // Rotate the motor one step
+      delay(HomingSpeed);                                             // wait for a short time, so the motor turnes by the allowed speed
+      digitalWrite(ClawStepperPulsePin, LOW);                         // make sure the motor is ready for the next step
+      delay(HomingSpeed);                                             // wait just to be sure the motor is ready to turn again, determained by the allowed speed
+    }
+    else if (ClawEndStopStatus == HIGH && HomingStatus == 0) {        // if the arm reached the endstop, make sure the system knows that and move on to the next stage
+      MotorPosition = 0;
+      HomingStatus = 1;
+    }
+    else if (HomingStatus == 1 && MotorPosition < FlatPoint){         // if the arm is the 2nd phase of homing; move to FlatPoint
+      digitalWrite(ClawStepperDirPin, HIGH);                          // set the direction of the stepper to clockwise
+      digitalWrite(ClawStepperPulsePin, HIGH);
+      delay(HomingSpeed);
+      digitalWrite(ClawStepperPulsePin, LOW);
+      delay(HomingSpeed);
+      MotorPosition ++;
+    }
+    else if (HomingStatus == 1 && MotorPosition == FlatPoint){        // if the arm reached flatpoint; finish homing, and allow the arm to recieve input
+      HomingStatus = 2;
+      ArmRotatable = 1;
+    }
+  }
+  else if (ClawRotateButtonPosition == HIGH && ClawRotateButtonPosition != ClawRotateButtonPreviousPosition && ArmRotatable == 1){  // check if the button is pressed and if the arm may be rotated
+    ArmRotatable = 0;                          // set the permission to move the arm to NO to prevent interference from new commands while the rotate function runs
+    //Check where the arm needs to go, and make sure the system knows what way to turn the motor
+    if (MotorPosition == FlatPoint){
+      RotatingStatus = 1;
+    }
+    else if (MotorPosition == TopDownPoint){
+      RotatingStatus = 0;
+    }
+  }
+  else if (ArmRotatable == 0){                                        // see if the motor needs to move because the button is pressed
+    if (RotatingStatus == 1 && MotorPosition != TopDownPoint){         // if it needs to move to TopDownPoin and isn't there yet, move a step
+      digitalWrite(ClawStepperDirPin, HIGH);
+      digitalWrite(ClawStepperPulsePin, HIGH);
+      delay(TurningSpeed);
+      digitalWrite(ClawStepperPulsePin, LOW);
+      delay(TurningSpeed);
+      MotorPosition ++;
+    }
+    else if (RotatingStatus == 1 && MotorPosition == TopDownPoint){   // if it needs to move to TopDownPoin and has arived there; finish the moving and allow the arm to recieve input again
+      RotatingStatus = 2;
+      ArmRotatable = 1;
+    }
+    else if (RotatingStatus == 0 && MotorPosition != FlatPoint){          // if it needs to move to FlatPoint and isn't there yet, move a step
+      digitalWrite(ClawStepperDirPin, LOW);
+      digitalWrite(ClawStepperPulsePin, HIGH);
+      delay(TurningSpeed);
+      digitalWrite(ClawStepperPulsePin, LOW);
+      delay(TurningSpeed);
+      MotorPosition --;
+    }
+    else if (RotatingStatus == 0 && MotorPosition == FlatPoint){    // if it needs to move to FlatPoint and has arived there; finish the moving and allow the arm to recieve input again
+      RotatingStatus = 2;
+      ArmRotatable = 1;
+    }
+  }
+  ClawRotateButtonPreviousPosition = ClawRotateButtonPosition;
+
+ClawMovableSwitchPosition = digitalRead(ClawMovableSwitch);
+  if (ClawMovableSwitchPosition == HIGH){
+    digitalWrite(ClawMovableGreenLed, HIGH);
+    digitalWrite(ClawMovableRedLed, LOW);
+      // potmeter reading/servo setting
+    TotalClawPotReadings = TotalClawPotReadings - ClawPotReadings[ClawPotReadingIndex];    // subtract the last reading:
+    ClawPotReadings[ClawPotReadingIndex] = analogRead(ClawPot);                            // reads the value of the potentiometer (value between 0 and 1023)
+      TotalClawPotReadings = TotalClawPotReadings + ClawPotReadings[ClawPotReadingIndex];  // add the reading to the total:
+      ClawPotReadingIndex = ClawPotReadingIndex + 1;                                       // advance to the next position in the array:
+    if (ClawPotReadingIndex >= NumReadings) {                                              // if we're at the end of the array...
+      ClawPotReadingIndex = 0;                                                             // ...wrap around to the beginning:
+    }
+    ClawPotReadingSmoothed = TotalClawPotReadings / NumReadings;                           // calculate the average:
+      ClawPotReadingSmoothed = map(ClawPotReadingSmoothed, 0, 1023, 45, 135);              // scale it to use it with the servo (value between 0 and 180)
+  
+    ClawServo.write(ClawPotReadingSmoothed);                                               // sets the servo position according to the scaled value
+    delay(30);                                                                             // give the servo a moment to catch up
+  }
+  else {
+    digitalWrite(ClawMovableGreenLed, LOW);
+    digitalWrite(ClawMovableRedLed, HIGH);
+  }
+
+}
